@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dremio-config
+data:
+  {{- tpl ($.Files.Glob "config/*").AsConfig . | nindent 2 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dremio-hive2-config
+data:
+  {{- tpl ($.Files.Glob "config/hive2/*").AsConfig . | nindent 2 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dremio-hive3-config
+data:
+  {{- tpl ($.Files.Glob "config/hive3/*").AsConfig . | nindent 2 }}
+---
+{{- $originalValues := mustDeepCopy $.Values -}}
+{{- range $engine := keys (default (dict) $.Values.executor.engineOverride) -}}
+{{- if has $engine $.Values.executor.engines -}}
+{{- $_ := mustMergeOverwrite $.Values $originalValues -}}
+{{- $engineAwareConfig := mustDeepCopy $.Values -}}
+{{- $_ := set $engineAwareConfig "currentEngine" $engine }}
+{{- $_ := mustMergeOverwrite $engineAwareConfig.executor (get $.Values.executor.engineOverride $engine) -}}
+{{- $_ := mustMergeOverwrite $.Values $engineAwareConfig -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dremio-config-{{ $engine }}
+data:
+  {{- tpl ($.Files.Glob "config/*").AsConfig $ | nindent 2 }}
+---
+{{- end -}}
+{{- end -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-scripts
+data:
+  sync-queries-json.sh: |-
+    #!/bin/sh
+    # Usage: sh sync-queries-json.sh destination [run_every_x_seconds | 'once']
+    trap "exit" SIGTERM
+    DIRNAME=`dirname "$0"`
+    while true; do
+      # truncate strings over 32000 chars
+      python $DIRNAME/truncate_queries_json.py "/opt/dremio/data/log/queries*json" w
+      python $DIRNAME/truncate_queries_json.py "/opt/dremio/data/log/archive/queries*json.gz"
+      # Sync with aws cli
+      aws s3 sync --exclude "*" --include "truncated_queries*json.gz" /opt/dremio/data/log/ $1
+      aws s3 sync --exclude "*" --include "truncated_queries*json.gz" /opt/dremio/data/log/archive/ $1
+      if test $2 = 'once'; then
+        break
+      fi
+      sleep $2
+    done
+  truncate_queries_json.py: |-
+    import json
+    import os
+    import sys
+    import gzip
+    import glob
+
+    for infn in glob.iglob(sys.argv[1]):
+      print("INFO: Processing " + infn)
+      outfn = os.path.dirname(infn) + '/truncated_' + os.path.basename(infn) + ('.gz' if infn[-3:] != '.gz' else '')
+      # do not re-process files if not requested
+      if (len(sys.argv) < 3 or sys.argv[2] != 'w') and os.path.isfile(outfn):
+        print("INFO: Skipping since processed file already exists " + infn)
+        continue
+      if infn[-3:] == '.gz':
+        inf = gzip.open(infn, "rt")
+      else:
+        inf = open(infn, "r")
+      outf = gzip.open(outfn, "wt")
+      data = [json.loads(line) for line in inf]
+      for line in data:
+        for item in line:
+          value = line[item]
+          if (type(value) == str or type(value) == unicode) and len(value) >= 31999:
+            line[item] = value[:31999]
+        outf.write(json.dumps(line) + '\n')
+      inf.close()
+      outf.close()
+      print("INFO: Finished output file " + outfn)
+  sync-logs.sh: |-
+    #!/bin/sh
+    # Usage: sh sync-logs.sh destination [run_every_x_seconds | 'once']
+    trap "exit" SIGTERM
+    DIRNAME=`dirname "$0"`
+    while true; do
+      # Sync with aws cli
+      aws s3 sync --exclude "*" --include "server.log" /opt/dremio/data/log/ $1
+      aws s3 sync --exclude "*" --include "server.*.log.gz" /opt/dremio/data/log/archive/ $1
+      if test $2 = 'once'; then
+        break
+      fi
+      sleep $2
+    done

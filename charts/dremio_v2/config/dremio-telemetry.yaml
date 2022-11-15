@@ -1,0 +1,10 @@
+# Dremio telemetry configuration file
+# Control if this file should automatically be reloaded, and at which interval.
+auto-reload:
+  enabled: True
+  period: 30
+  unit: SECONDS
+metrics:
+  - name: reporter_jmx
+    reporter:
+      type: jmx
